@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Key Format Debugger</title>
+    <script src="https://unpkg.com/@solana/web3.js@1.87.6/lib/index.iife.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bs58@5.0.0/index.min.js"></script>
+</head>
+<body style="background: black; color: lime; padding: 20px; font-family: monospace;">
+    <h1>🔍 KEY FORMAT DEBUGGER</h1>
+    <p>Paste your Pump.fun key and we'll try EVERY possible decoding method:</p>
+    
+    <textarea id="keyInput" style="width: 100%; height: 100px; background: black; color: lime; border: 1px solid lime; padding: 10px; margin: 20px 0;"></textarea>
+    <button onclick="testAll()" style="padding: 10px 20px; background: black; color: lime; border: 1px solid lime; cursor: pointer;">TEST ALL METHODS</button>
+    
+    <div id="output" style="background: #111; border: 1px solid lime; padding: 20px; margin-top: 20px; white-space: pre-wrap; max-height: 600px; overflow-y: auto;"></div>
+    
+    <script>
+        function log(msg) {
+            document.getElementById('output').innerHTML += msg + '\n';
+        }
+        
+        function testAll() {
+            document.getElementById('output').innerHTML = '';
+            const input = document.getElementById('keyInput').value.trim();
+            
+            if (!input) {
+                log('❌ Please paste your key first!');
+                return;
+            }
+            
+            log('📋 Testing key: ' + input.substring(0, 50) + '...');
+            log('📏 Length: ' + input.length + ' characters\n');
+            log('='.repeat(80) + '\n');
+            
+            // Method 1: Direct array
+            if (input.startsWith('[')) {
+                try {
+                    log('METHOD 1: Array format');
+                    const arr = JSON.parse(input);
+                    const bytes = Uint8Array.from(arr);
+                    log('✅ SUCCESS! Parsed ' + bytes.length + ' bytes');
+                    log('First 10 bytes: ' + Array.from(bytes.slice(0, 10)).join(', '));
+                    
+                    const keypair = solanaWeb3.Keypair.fromSecretKey(bytes);
+                    log('✅ KEYPAIR CREATED!');
+                    log('Public key: ' + keypair.publicKey.toString());
+                    log('\n' + '='.repeat(80) + '\n');
+                    return;
+                } catch (e) {
+                    log('❌ Failed: ' + e.message);
+                    log('\n' + '='.repeat(80) + '\n');
+                }
+            }
+            
+            // Method 2: bs58 library
+            try {
+                log('METHOD 2: bs58 library (standard Base58)');
+                const decoded = bs58.decode(input);
+                log('✅ Decoded to ' + decoded.length + ' bytes');
+                log('First 10 bytes: ' + Array.from(decoded.slice(0, 10)).join(', '));
+                
+                if (decoded.length === 64) {
+                    try {
+                        const keypair = solanaWeb3.Keypair.fromSecretKey(decoded);
+                        log('✅ KEYPAIR CREATED!');
+                        log('Public key: ' + keypair.publicKey.toString());
+                        log('\n🎉 THIS METHOD WORKS! Use bs58 library.');
+                    } catch (e) {
+                        log('❌ Keypair creation failed: ' + e.message);
+                    }
+                } else {
+                    log('❌ Wrong length (need 64 bytes, got ' + decoded.length + ')');
+                }
+            } catch (e) {
+                log('❌ Failed: ' + e.message);
+            }
+            log('\n' + '='.repeat(80) + '\n');
+            
+            // Method 3: Hex
+            try {
+                log('METHOD 3: Hexadecimal');
+                const cleaned = input.replace(/[^0-9a-fA-F]/g, '');
+                if (cleaned.length === 128) {
+                    const bytes = new Uint8Array(cleaned.match(/.{2}/g).map(byte => parseInt(byte, 16)));
+                    log('✅ Decoded to ' + bytes.length + ' bytes');
+                    
+                    const keypair = solanaWeb3.Keypair.fromSecretKey(bytes);
+                    log('✅ KEYPAIR CREATED!');
+                    log('Public key: ' + keypair.publicKey.toString());
+                    log('\n🎉 THIS METHOD WORKS! Key is in hexadecimal format.');
+                } else {
+                    log('❌ Not valid hex (need 128 hex chars, got ' + cleaned.length + ')');
+                }
+            } catch (e) {
+                log('❌ Failed: ' + e.message);
+            }
+            log('\n' + '='.repeat(80) + '\n');
+            
+            // Method 4: Check if this is actually a public key
+            try {
+                log('METHOD 4: Maybe this is a public key, not private key?');
+                const publicKey = new solanaWeb3.PublicKey(input);
+                log('✅ This is a VALID PUBLIC KEY: ' + publicKey.toString());
+                log('⚠️  But you need the PRIVATE KEY to sign transactions!');
+                log('Go back to Pump.fun and look for "Export Private Key" or "Show Secret Key"');
+            } catch (e) {
+                log('❌ Not a public key either: ' + e.message);
+            }
+            log('\n' + '='.repeat(80) + '\n');
+            
+            // Method 5: Character analysis
+            log('METHOD 5: Character analysis');
+            const invalidChars = [];
+            const base58Alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+            
+            for (let i = 0; i < input.length; i++) {
+                if (!base58Alphabet.includes(input[i])) {
+                    invalidChars.push({pos: i, char: input[i], code: input.charCodeAt(i)});
+                }
+            }
+            
+            if (invalidChars.length > 0) {
+                log('❌ Found ' + invalidChars.length + ' invalid Base58 character(s):');
+                invalidChars.forEach(c => {
+                    log('  Position ' + c.pos + ': "' + c.char + '" (ASCII ' + c.code + ')');
+                });
+                log('\n⚠️  Base58 only uses: ' + base58Alphabet);
+                log('⚠️  Note: NO "0", "O", "I", or lowercase "l"');
+            } else {
+                log('✅ All characters are valid Base58');
+            }
+            
+            log('\n' + '='.repeat(80));
+            log('\n📋 SUMMARY:');
+            log('If NONE of these methods worked, the key format is non-standard.');
+            log('Please check Pump.fun for:');
+            log('  1. "Export as byte array" option');
+            log('  2. Alternative export formats');
+            log('  3. Whether you copied the PRIVATE key (not public key)');
+        }
+        
+        setTimeout(() => {
+            if (typeof solanaWeb3 === 'undefined' || typeof bs58 === 'undefined') {
+                log('❌ Libraries failed to load. Refresh the page.');
+            } else {
+                log('✅ Libraries loaded. Paste your key and click TEST ALL METHODS.\n\n');
+            }
+        }, 1000);
+    </script>
+</body>
+</html>
