@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Solana Bundler</title>
+    <script src="https://unpkg.com/@solana/web3.js@1.87.6/lib/index.iife.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; color: #0f0; font-family: monospace; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { color: #0ff; margin-bottom: 20px; }
+        .section { background: #111; border: 1px solid #0f0; padding: 20px; margin-bottom: 20px; }
+        button, input, textarea { 
+            background: #000; color: #0f0; border: 1px solid #0f0; 
+            padding: 10px; margin: 5px 0; font-family: monospace; cursor: pointer;
+        }
+        button:hover { background: #0f0; color: #000; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        textarea { width: 100%; height: 80px; }
+        input[type="number"] { width: 200px; }
+        #logs { background: #000; border: 1px solid #333; padding: 10px; height: 400px; overflow-y: auto; font-size: 12px; }
+        .hidden { display: none; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .error { color: #f00; }
+        .success { color: #0f0; }
+        .info { color: #0ff; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚡ SOLANA BUNDLER</h1>
+        
+        <!-- Step 1: Load Wallet -->
+        <div id="step1" class="section">
+            <h2>STEP 1: LOAD WALLET</h2>
+            <p class="info">Paste your private key (Base58 format - should be 87-88 characters)</p>
+            <p class="info">OR paste as array: [123, 45, 67, ...]</p>
+            <textarea id="keyInput" placeholder="Paste your private key"></textarea>
+            <p id="keyInfo" style="margin: 10px 0; font-size: 14px;"></p>
+            <button id="loadBtn" onclick="loadWallet()" disabled>LOADING LIBRARY...</button>
+        </div>
+        
+        <!-- Step 2: Fund & Sweep -->
+        <div id="step2" class="section hidden">
+            <h2>STEP 2: FUND & SWEEP</h2>
+            <div class="grid">
+                <div>
+                    <p>Main Wallet: <span id="mainAddr">?</span></p>
+                    <p>Balance: <span id="mainBal">0 SOL</span></p>
+                    <br>
+                    <input type="number" id="amount" value="0.002" step="0.001" min="0.002">
+                    <button onclick="fund()">FUND</button>
+                    <br><br>
+                    <button onclick="sweep()">SWEEP ALL</button>
+                </div>
+                <div>
+                    <h3>LOGS</h3>
+                    <div id="logs"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let mainWallet, publicKey, connection, balanceConnection, subWallets = [];
+        let isBusy = false;
+        let Connection, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL;
+        let libraryLoaded = false;
+        
+        // Logging function
+        function log(msg, type = 'info') {
+            const logs = document.getElementById('logs');
+            const time = new Date().toLocaleTimeString();
+            const className = type === 'error' ? 'error' : type === 'success' ? 'success' : 'info';
+            logs.innerHTML += `<div class="${className}">[${time}] ${msg}</div>`;
+            logs.scrollTop = logs.scrollHeight;
+        }
+        
+        // Show key info as user types
+        document.addEventListener('DOMContentLoaded', function() {
+            const keyInput = document.getElementById('keyInput');
+            const keyInfo = document.getElementById('keyInfo');
+            
+            keyInput.addEventListener('input', function() {
+                const value = this.value.trim();
+                if (!value) {
+                    keyInfo.textContent = '';
+                    return;
+                }
+                
+                if (value.startsWith('[')) {
+                    keyInfo.textContent = '✓ Detected: Array format';
+                    keyInfo.className = 'success';
+                } else {
+                    const len = value.length;
+                    if (len < 87) {
+                        keyInfo.textContent = `⚠ Length: ${len} chars (need 87-88 for Base58)`;
+                        keyInfo.className = 'error';
+                    } else if (len >= 87 && len <= 88) {
+                        keyInfo.textContent = `✓ Length: ${len} chars (looks good!)`;
+                        keyInfo.className = 'success';
+                    } else {
+                        keyInfo.textContent = `⚠ Length: ${len} chars (unusually long)`;
+                        keyInfo.className = 'info';
+                    }
+                }
+            });
+        });
+        
+        // Base58 decoder function
+        function decodeBase58(input) {
+            const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+            const bytes = [0];
+            
+            for (let i = 0; i < input.length; i++) {
+                const c = input[i];
+                const value = ALPHABET.indexOf(c);
+                if (value === -1) {
+                    throw new Error(`Invalid Base58 character at position ${i}: "${c}"`);
+                }
+                
+                for (let j = 0; j < bytes.length; j++) bytes[j] *= 58;
+                bytes[0] += value;
+                
+                let carry = 0;
+                for (let j = 0; j < bytes.length; j++) {
+                    bytes[j] += carry;
+                    carry = bytes[j] >> 8;
+                    bytes[j] &= 0xff;
+                }
+                
+                while (carry > 0) {
+                    bytes.push(carry & 0xff);
+                    carry >>= 8;
+                }
+            }
+            
+            // Add leading zeros
+            for (let i = 0; i < input.length && input[i] === '1'; i++) {
+                bytes.push(0);
+            }
+            
+            return new Uint8Array(bytes.reverse());
+        }
+        
+        // Load wallet function
+        async function loadWallet() {
+            // Double check library is loaded
+            if (!libraryLoaded) {
+                alert('Solana library is still loading. Please wait a moment and try again.');
+                return;
+            }
+            
+            const input = document.getElementById('keyInput').value.replace(/\s+/g, '').trim();
+            
+            if (!input) {
+                alert('Please paste your private key!');
+                return;
+            }
+            
+            log('🔑 Loading wallet...', 'info');
+            
+            try {
+                let secretKey;
+                
+                if (input.startsWith('[')) {
+                    // Array format
+                    log('📋 Parsing array format...', 'info');
+                    const arr = JSON.parse(input);
+                    secretKey = Uint8Array.from(arr);
+                    log(`✓ Parsed ${secretKey.length} bytes from array`, 'success');
+                } else {
+                    // Base58 format
+                    log(`📋 Decoding Base58 (${input.length} characters)...`, 'info');
+                    
+                    if (input.length < 87) {
+                        throw new Error(`Key too short! Got ${input.length} chars, need 87-88. Did you copy the entire key?`);
+                    }
+                    
+                    secretKey = decodeBase58(input);
+                    log(`✓ Decoded to ${secretKey.length} bytes`, 'success');
+                }
+                
+                // Validate length
+                if (secretKey.length !== 64) {
+                    throw new Error(`Invalid key length! Need exactly 64 bytes, got ${secretKey.length} bytes.`);
+                }
+                
+                log('🔐 Creating keypair...', 'info');
+                mainWallet = Keypair.fromSecretKey(secretKey);
+                publicKey = mainWallet.publicKey;
+                
+                log('✅ SUCCESS: Wallet loaded!', 'success');
+                log('📍 Public key: ' + publicKey.toString(), 'success');
+                
+                document.getElementById('mainAddr').textContent = publicKey.toString().slice(0,8) + '...';
+                
+                // Load sub-wallets
+                log('📦 Loading sub-wallets...', 'info');
+                const response = await fetch('bundler-wallet-keys.json');
+                const data = await response.json();
+                
+                subWallets = [];
+                for (let i = 0; i < 20; i++) {
+                    const keypair = Keypair.fromSecretKey(Uint8Array.from(data.wallets[i].secretKey));
+                    subWallets.push({ keypair, balance: 0, status: 'empty' });
+                }
+                
+                log('✅ Loaded 20 sub-wallets', 'success');
+                
+                document.getElementById('step1').classList.add('hidden');
+                document.getElementById('step2').classList.remove('hidden');
+                
+                updateBalance();
+                
+            } catch (error) {
+                log('❌ ERROR: ' + error.message, 'error');
+                console.error('Full error:', error);
+                alert('Failed to load wallet:\n\n' + error.message + '\n\nCheck the console (F12) for details.');
+            }
+        }
+        
+        // Update balance function
+        async function updateBalance() {
+            if (!publicKey) return;
+            try {
+                const balance = await balanceConnection.getBalance(publicKey);
+                document.getElementById('mainBal').textContent = (balance / LAMPORTS_PER_SOL).toFixed(4) + ' SOL';
+            } catch (e) {
+                log('⚠ Could not fetch balance: ' + e.message, 'error');
+            }
+        }
+        
+        // Fund function
+        async function fund() {
+            if (isBusy) return alert('Busy...');
+            if (!mainWallet) return alert('Load wallet first!');
+            
+            isBusy = true;
+            
+            try {
+                const total = parseFloat(document.getElementById('amount').value);
+                const testMode = total < 0.01;
+                const numWallets = testMode ? 2 : 20;
+                
+                log(testMode ? '🧪 TEST MODE: 2 wallets' : '🚀 FULL MODE: 20 wallets', 'info');
+                
+                const amountPer = total / numWallets;
+                const lamportsPer = Math.floor(amountPer * LAMPORTS_PER_SOL);
+                
+                log(`💰 Funding ${numWallets} wallets: ${amountPer.toFixed(6)} SOL each`, 'info');
+                
+                const { blockhash } = await connection.getLatestBlockhash('finalized');
+                
+                const tx = new Transaction();
+                tx.recentBlockhash = blockhash;
+                tx.feePayer = publicKey;
+                
+                for (let i = 0; i < numWallets; i++) {
+                    tx.add(SystemProgram.transfer({
+                        fromPubkey: publicKey,
+                        toPubkey: subWallets[i].keypair.publicKey,
+                        lamports: lamportsPer
+                    }));
+                }
+                
+                tx.sign(mainWallet);
+                
+                log('📤 Sending transaction...', 'info');
+                
+                const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+                
+                log('⏳ Confirming...', 'info');
+                log('🔗 https://solscan.io/tx/' + sig, 'info');
+                
+                for (let i = 0; i < 30; i++) {
+                    const status = await connection.getSignatureStatus(sig);
+                    if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
+                        if (!status.value?.err) {
+                            log('✅ CONFIRMED!', 'success');
+                            for (let j = 0; j < numWallets; j++) {
+                                subWallets[j].balance = amountPer;
+                                subWallets[j].status = 'funded';
+                            }
+                            updateBalance();
+                            log(`✅ Success! ${numWallets} wallets funded`, 'success');
+                            break;
+                        }
+                    }
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+                
+            } catch (error) {
+                log('❌ ERROR: ' + error.message, 'error');
+                console.error('Full error:', error);
+                alert('Error: ' + error.message);
+            } finally {
+                isBusy = false;
+            }
+        }
+        
+        // Sweep function
+        async function sweep() {
+            if (isBusy) return alert('Busy...');
+            if (!mainWallet) return alert('Load wallet first!');
+            if (!confirm('Sweep all wallets back to main wallet?')) return;
+            
+            isBusy = true;
+            
+            try {
+                log('🧹 Starting sweep...', 'info');
+                
+                const { blockhash } = await connection.getLatestBlockhash('finalized');
+                let totalSwept = 0;
+                let successCount = 0;
+                
+                for (let i = 0; i < 20; i++) {
+                    try {
+                        const balance = await balanceConnection.getBalance(subWallets[i].keypair.publicKey);
+                        
+                        if (balance < 5000) {
+                            log(`⏭️  Wallet ${i+1}: Empty, skipping`, 'info');
+                            continue;
+                        }
+                        
+                        const transferAmount = balance - 5000;
+                        
+                        log(`💰 Sweeping wallet ${i+1}...`, 'info');
+                        
+                        const tx = new Transaction();
+                        tx.recentBlockhash = blockhash;
+                        tx.feePayer = subWallets[i].keypair.publicKey;
+                        tx.add(SystemProgram.transfer({
+                            fromPubkey: subWallets[i].keypair.publicKey,
+                            toPubkey: publicKey,
+                            lamports: transferAmount
+                        }));
+                        tx.sign(subWallets[i].keypair);
+                        
+                        const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+                        
+                        for (let attempt = 0; attempt < 20; attempt++) {
+                            const status = await connection.getSignatureStatus(sig);
+                            if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
+                                if (!status.value?.err) {
+                                    const solAmount = transferAmount / LAMPORTS_PER_SOL;
+                                    totalSwept += solAmount;
+                                    successCount++;
+                                    log(`✅ Wallet ${i+1}: ${solAmount.toFixed(6)} SOL`, 'success');
+                                    break;
+                                }
+                            }
+                            await new Promise(r => setTimeout(r, 2000));
+                        }
+                        
+                        await new Promise(r => setTimeout(r, 1000));
+                        
+                    } catch (e) {
+                        log(`❌ Wallet ${i+1} failed: ${e.message}`, 'error');
+                    }
+                }
+                
+                log(`🎉 SWEEP COMPLETE! ${successCount} wallets, ${totalSwept.toFixed(6)} SOL`, 'success');
+                updateBalance();
+                alert(`Done! ${successCount} wallets swept, ${totalSwept.toFixed(6)} SOL returned`);
+                
+            } catch (error) {
+                log('❌ ERROR: ' + error.message, 'error');
+                console.error('Full error:', error);
+                alert('Error: ' + error.message);
+            } finally {
+                isBusy = false;
+            }
+        }
+        
+        // Initialize Solana library - WAIT PROPERLY
+        function initializeSolana() {
+            if (typeof solanaWeb3 !== 'undefined') {
+                // Library loaded!
+                Connection = solanaWeb3.Connection;
+                Keypair = solanaWeb3.Keypair;
+                Transaction = solanaWeb3.Transaction;
+                SystemProgram = solanaWeb3.SystemProgram;
+                LAMPORTS_PER_SOL = solanaWeb3.LAMPORTS_PER_SOL;
+                
+                // Initialize connections
+                connection = new Connection('https://frequent-cosmopolitan-thunder.solana-mainnet.quiknode.pro/3108ed2d47a7f31953201358cdef57f0cf652e77/', 'confirmed');
+                balanceConnection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+                
+                libraryLoaded = true;
+                
+                // Enable button
+                const loadBtn = document.getElementById('loadBtn');
+                loadBtn.textContent = 'LOAD WALLET';
+                loadBtn.disabled = false;
+                
+                console.log('✅ Solana Web3 library loaded successfully');
+            } else {
+                // Not loaded yet, try again
+                setTimeout(initializeSolana, 100);
+            }
+        }
+        
+        // Start checking for library
+        initializeSolana();
+    </script>
+</body>
+</html>
