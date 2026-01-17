@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bundler Test</title>
+    <script src="https://unpkg.com/@solana/web3.js@1.87.6/lib/index.iife.min.js"></script>
+</head>
+<body style="background: black; color: lime; padding: 20px; font-family: monospace;">
+    <h1>BUNDLER TEST</h1>
+    <p id="status">Loading...</p>
+    
+    <div style="margin: 20px 0;">
+        <textarea id="keyInput" placeholder="Paste private key" style="width: 500px; height: 100px; background: black; color: lime; border: 1px solid lime; padding: 10px;"></textarea>
+        <br>
+        <button onclick="testKey()" style="margin-top: 10px; padding: 10px 20px; background: black; color: lime; border: 1px solid lime; cursor: pointer;">TEST KEY</button>
+    </div>
+    
+    <div id="output" style="background: #111; border: 1px solid lime; padding: 20px; margin-top: 20px;"></div>
+    
+    <script>
+        function addLog(msg) {
+            const output = document.getElementById('output');
+            const time = new Date().toLocaleTimeString();
+            output.innerHTML += `<div>[${time}] ${msg}</div>`;
+        }
+        
+        setTimeout(function() {
+            if (typeof solanaWeb3 === 'undefined') {
+                document.getElementById('status').textContent = '❌ Solana library FAILED to load';
+                addLog('ERROR: solanaWeb3 is undefined');
+            } else {
+                document.getElementById('status').textContent = '✅ Solana library loaded!';
+                addLog('SUCCESS: Solana Web3 loaded');
+                addLog('Available: ' + Object.keys(solanaWeb3).slice(0, 5).join(', '));
+            }
+        }, 2000);
+        
+        function testKey() {
+            addLog('--- TESTING KEY ---');
+            
+            const input = document.getElementById('keyInput').value.replace(/\s+/g, '').trim();
+            
+            if (!input) {
+                addLog('ERROR: No key provided');
+                return;
+            }
+            
+            addLog('Key length: ' + input.length + ' characters');
+            addLog('First 10 chars: ' + input.substring(0, 10));
+            
+            if (typeof solanaWeb3 === 'undefined') {
+                addLog('ERROR: Solana library not loaded');
+                return;
+            }
+            
+            try {
+                addLog('Attempting to decode Base58...');
+                
+                // Manual Base58 decoder
+                const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+                const bytes = [0];
+                
+                for (let i = 0; i < input.length; i++) {
+                    const c = input[i];
+                    const value = ALPHABET.indexOf(c);
+                    if (value === -1) {
+                        addLog('ERROR: Invalid Base58 character: ' + c);
+                        return;
+                    }
+                    
+                    for (let j = 0; j < bytes.length; j++) bytes[j] *= 58;
+                    bytes[0] += value;
+                    
+                    let carry = 0;
+                    for (let j = 0; j < bytes.length; j++) {
+                        bytes[j] += carry;
+                        carry = bytes[j] >> 8;
+                        bytes[j] &= 0xff;
+                    }
+                    
+                    while (carry > 0) {
+                        bytes.push(carry & 0xff);
+                        carry >>= 8;
+                    }
+                }
+                
+                // Add leading zeros
+                for (let i = 0; i < input.length && input[i] === '1'; i++) {
+                    bytes.push(0);
+                }
+                
+                const decoded = new Uint8Array(bytes.reverse());
+                
+                addLog('SUCCESS: Decoded to ' + decoded.length + ' bytes');
+                
+                if (decoded.length !== 64) {
+                    addLog('ERROR: Need 64 bytes, got ' + decoded.length);
+                    return;
+                }
+                
+                addLog('Attempting to create keypair...');
+                const keypair = solanaWeb3.Keypair.fromSecretKey(decoded);
+                
+                addLog('SUCCESS: Keypair created!');
+                addLog('Public key: ' + keypair.publicKey.toString());
+                
+            } catch (error) {
+                addLog('ERROR: ' + error.message);
+                addLog('Stack: ' + error.stack);
+            }
+        }
+    </script>
+</body>
+</html>
