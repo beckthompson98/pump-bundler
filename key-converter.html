@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Key Converter</title>
+    <script src="https://unpkg.com/@solana/web3.js@1.87.6/lib/index.iife.min.js"></script>
+</head>
+<body style="background: black; color: lime; padding: 20px; font-family: monospace;">
+    <h1>🔑 PHANTOM KEY CONVERTER</h1>
+    <p>Paste your 88-character Phantom key and we'll convert it to array format:</p>
+    
+    <textarea id="keyInput" style="width: 100%; height: 100px; background: black; color: lime; border: 1px solid lime; padding: 10px; margin: 20px 0;"></textarea>
+    <button onclick="convert()" style="padding: 10px 20px; background: black; color: lime; border: 1px solid lime; cursor: pointer;">CONVERT</button>
+    
+    <div id="output" style="background: #111; border: 1px solid lime; padding: 20px; margin-top: 20px; white-space: pre-wrap;"></div>
+    
+    <script>
+        function log(msg) {
+            document.getElementById('output').innerHTML += msg + '\n';
+        }
+        
+        function decodeBase58(str) {
+            const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+            const ALPHABET_MAP = {};
+            for (let i = 0; i < ALPHABET.length; i++) {
+                ALPHABET_MAP[ALPHABET[i]] = i;
+            }
+            
+            if (str.length === 0) return new Uint8Array(0);
+            
+            let zeros = 0;
+            for (let i = 0; i < str.length && str[i] === '1'; i++) {
+                zeros++;
+            }
+            
+            const size = Math.floor((str.length - zeros) * 733 / 1000) + 1;
+            const b256 = new Uint8Array(size);
+            
+            for (let i = zeros; i < str.length; i++) {
+                let carry = ALPHABET_MAP[str[i]];
+                if (carry === undefined) {
+                    throw new Error('Invalid Base58 character: ' + str[i]);
+                }
+                
+                for (let j = size - 1; j >= 0; j--) {
+                    carry += 58 * b256[j];
+                    b256[j] = carry % 256;
+                    carry = Math.floor(carry / 256);
+                }
+                
+                if (carry !== 0) {
+                    throw new Error('Base58 decode overflow');
+                }
+            }
+            
+            let start = 0;
+            while (start < size && b256[start] === 0) {
+                start++;
+            }
+            
+            const result = new Uint8Array(zeros + (size - start));
+            for (let i = 0; i < zeros; i++) {
+                result[i] = 0;
+            }
+            for (let i = start; i < size; i++) {
+                result[zeros + i - start] = b256[i];
+            }
+            
+            return result;
+        }
+        
+        function convert() {
+            document.getElementById('output').innerHTML = '';
+            const input = document.getElementById('keyInput').value.trim();
+            
+            if (!input) {
+                log('❌ Paste your key first!');
+                return;
+            }
+            
+            log('🔑 Converting key...\n');
+            log('Input length: ' + input.length + ' characters\n');
+            
+            try {
+                // Try custom decoder
+                log('METHOD 1: Custom Base58 decoder');
+                const decoded = decodeBase58(input);
+                log('✅ Decoded to ' + decoded.length + ' bytes\n');
+                
+                if (decoded.length === 64) {
+                    log('✅ CORRECT LENGTH!\n');
+                    log('Copy this array format and paste it into the bundler:\n');
+                    log('[' + Array.from(decoded).join(', ') + ']\n');
+                    
+                    // Test if it creates a valid keypair
+                    try {
+                        const keypair = solanaWeb3.Keypair.fromSecretKey(decoded);
+                        log('\n✅ KEYPAIR TEST PASSED!');
+                        log('Public key: ' + keypair.publicKey.toString());
+                    } catch (e) {
+                        log('\n❌ KEYPAIR TEST FAILED: ' + e.message);
+                        log('This key format is not working. Try exporting from Phantom in a different format.');
+                    }
+                } else {
+                    log('❌ Wrong length: ' + decoded.length + ' bytes (need 64)');
+                }
+                
+            } catch (e) {
+                log('❌ Decode failed: ' + e.message);
+                
+                // Try with Solana's built-in decoder if available
+                log('\n\nMETHOD 2: Checking if this is actually a public key...');
+                try {
+                    const pubkey = new solanaWeb3.PublicKey(input);
+                    log('✅ This is a PUBLIC KEY: ' + pubkey.toString());
+                    log('\n⚠️  You need the PRIVATE KEY, not the public key!');
+                    log('In Phantom: Settings → Show Private Key (NOT the wallet address)');
+                } catch (e2) {
+                    log('❌ Not a public key either');
+                }
+            }
+        }
+        
+        setTimeout(() => {
+            if (typeof solanaWeb3 === 'undefined') {
+                alert('Library failed to load. Refresh page.');
+            }
+        }, 1000);
+    </script>
+</body>
+</html>
