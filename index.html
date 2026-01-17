@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Solana Bundler</title>
+    <script src="https://unpkg.com/@solana/web3.js@1.87.6/lib/index.iife.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; color: #0f0; font-family: monospace; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { color: #0ff; margin-bottom: 20px; }
+        .section { background: #111; border: 1px solid #0f0; padding: 20px; margin-bottom: 20px; }
+        button, input, textarea { 
+            background: #000; color: #0f0; border: 1px solid #0f0; 
+            padding: 10px; margin: 5px 0; font-family: monospace; cursor: pointer;
+        }
+        button:hover { background: #0f0; color: #000; }
+        textarea { width: 100%; height: 80px; }
+        input[type="number"] { width: 200px; }
+        #logs { background: #000; border: 1px solid #333; padding: 10px; height: 400px; overflow-y: auto; font-size: 12px; }
+        .hidden { display: none; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚡ SOLANA BUNDLER</h1>
+        
+        <!-- Step 1: Load Wallet -->
+        <div id="step1" class="section">
+            <h2>STEP 1: LOAD WALLET</h2>
+            <textarea id="keyInput" placeholder="Paste your private key"></textarea>
+            <button onclick="loadWallet()">LOAD WALLET</button>
+        </div>
+        
+        <!-- Step 2: Fund & Sweep -->
+        <div id="step2" class="section hidden">
+            <h2>STEP 2: FUND & SWEEP</h2>
+            <div class="grid">
+                <div>
+                    <p>Main Wallet: <span id="mainAddr">?</span></p>
+                    <p>Balance: <span id="mainBal">0 SOL</span></p>
+                    <br>
+                    <input type="number" id="amount" value="0.002" step="0.001" min="0.002">
+                    <button onclick="fund()">FUND</button>
+                    <br><br>
+                    <button onclick="sweep()">SWEEP ALL</button>
+                </div>
+                <div>
+                    <h3>LOGS</h3>
+                    <div id="logs"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let mainWallet, publicKey, connection, balanceConnection, subWallets = [];
+        let isBusy = false;
+        let Connection, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL;
+        
+        // Logging function
+        function log(msg) {
+            const logs = document.getElementById('logs');
+            const time = new Date().toLocaleTimeString();
+            logs.innerHTML += `<div>[${time}] ${msg}</div>`;
+            logs.scrollTop = logs.scrollHeight;
+        }
+        
+        // Base58 decoder function
+        function decodeBase58(input) {
+            const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+            const bytes = [0];
+            
+            for (let i = 0; i < input.length; i++) {
+                const c = input[i];
+                const value = ALPHABET.indexOf(c);
+                if (value === -1) throw new Error('Invalid Base58 character: ' + c);
+                
+                for (let j = 0; j < bytes.length; j++) bytes[j] *= 58;
+                bytes[0] += value;
+                
+                let carry = 0;
+                for (let j = 0; j < bytes.length; j++) {
+                    bytes[j] += carry;
+                    carry = bytes[j] >> 8;
+                    bytes[j] &= 0xff;
+                }
+                
+                while (carry > 0) {
+                    bytes.push(carry & 0xff);
+                    carry >>= 8;
+                }
+            }
+            
+            // Add leading zeros
+            for (let i = 0; i < input.length && input[i] === '1'; i++) {
+                bytes.push(0);
+            }
+            
+            return new Uint8Array(bytes.reverse());
+        }
+        
+        // Load wallet function
+        async function loadWallet() {
+            const input = document.getElementById('keyInput').value.replace(/\s+/g, '').trim();
+            
+            if (!input) {
+                alert('Paste your key!');
+                return;
+            }
+            
+            log('Loading wallet...');
+            
+            try {
+                let secretKey;
+                
+                if (input.startsWith('[')) {
+                    const arr = JSON.parse(input);
+                    secretKey = Uint8Array.from(arr);
+                } else {
+                    // Use Base58 decoder
+                    secretKey = decodeBase58(input);
+                }
+                
+                log(`Decoded ${secretKey.length} bytes`);
+                
+                if (secretKey.length !== 64) {
+                    throw new Error(`Need 64 bytes, got ${secretKey.length}`);
+                }
+                
+                mainWallet = Keypair.fromSecretKey(secretKey);
+                publicKey = mainWallet.publicKey;
+                
+                log('✅ SUCCESS: Wallet loaded!');
+                log('Public key: ' + publicKey.toString());
+                
+                document.getElementById('mainAddr').textContent = publicKey.toString().slice(0,8) + '...';
+                
+                // Load sub-wallets
+                const response = await fetch('bundler-wallet-keys.json');
+                const data = await response.json();
+                
+                subWallets = [];
+                for (let i = 0; i < 20; i++) {
+                    const keypair = Keypair.fromSecretKey(Uint8Array.from(data.wallets[i].secretKey));
+                    subWallets.push({ keypair, balance: 0, status: 'empty' });
+                }
+                
+                log('✅ Loaded 20 sub-wallets');
+                
+                document.getElementById('step1').classList.add('hidden');
+                document.getElementById('step2').classList.remove('hidden');
+                
+                updateBalance();
+                
+            } catch (error) {
+                log('❌ ERROR: ' + error.message);
+                console.error('Full error:', error);
+                alert('Failed: ' + error.message);
+            }
+        }
+        
+        // Update balance function
+        async function updateBalance() {
+            if (!publicKey) return;
+            try {
+                const balance = await balanceConnection.getBalance(publicKey);
+                document.getElementById('mainBal').textContent = (balance / LAMPORTS_PER_SOL).toFixed(4) + ' SOL';
+            } catch (e) {
+                log('Could not fetch balance: ' + e.message);
+            }
+        }
+        
+        // Fund function
+        async function fund() {
+            if (isBusy) return alert('Busy...');
+            if (!mainWallet) return alert('Load wallet first!');
+            
+            isBusy = true;
+            
+            try {
+                const total = parseFloat(document.getElementById('amount').value);
+                const testMode = total < 0.01;
+                const numWallets = testMode ? 2 : 20;
+                
+                log(testMode ? '🧪 TEST MODE: 2 wallets' : '🚀 FULL MODE: 20 wallets');
+                
+                const amountPer = total / numWallets;
+                const lamportsPer = Math.floor(amountPer * LAMPORTS_PER_SOL);
+                
+                log(`Funding ${numWallets} wallets: ${amountPer.toFixed(6)} SOL each`);
+                
+                const { blockhash } = await connection.getLatestBlockhash('finalized');
+                
+                const tx = new Transaction();
+                tx.recentBlockhash = blockhash;
+                tx.feePayer = publicKey;
+                
+                for (let i = 0; i < numWallets; i++) {
+                    tx.add(SystemProgram.transfer({
+                        fromPubkey: publicKey,
+                        toPubkey: subWallets[i].keypair.publicKey,
+                        lamports: lamportsPer
+                    }));
+                }
+                
+                tx.sign(mainWallet);
+                
+                log('📤 Sending transaction...');
+                
+                const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+                
+                log('⏳ Sent! Confirming...');
+                log('🔗 https://solscan.io/tx/' + sig);
+                
+                for (let i = 0; i < 30; i++) {
+                    const status = await connection.getSignatureStatus(sig);
+                    if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
+                        if (!status.value?.err) {
+                            log('✅ CONFIRMED!');
+                            for (let j = 0; j < numWallets; j++) {
+                                subWallets[j].balance = amountPer;
+                                subWallets[j].status = 'funded';
+                            }
+                            updateBalance();
+                            log(`✅ Success! ${numWallets} wallets funded`);
+                            break;
+                        }
+                    }
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+                
+            } catch (error) {
+                log('❌ ERROR: ' + error.message);
+                console.error('Full error:', error);
+                alert('Error: ' + error.message);
+            } finally {
+                isBusy = false;
+            }
+        }
+        
+        // Sweep function
+        async function sweep() {
+            if (isBusy) return alert('Busy...');
+            if (!mainWallet) return alert('Load wallet first!');
+            if (!confirm('Sweep all wallets back to main wallet?')) return;
+            
+            isBusy = true;
+            
+            try {
+                log('🧹 Starting sweep...');
+                
+                const { blockhash } = await connection.getLatestBlockhash('finalized');
+                let totalSwept = 0;
+                let successCount = 0;
+                
+                for (let i = 0; i < 20; i++) {
+                    try {
+                        const balance = await balanceConnection.getBalance(subWallets[i].keypair.publicKey);
+                        
+                        if (balance < 5000) {
+                            log(`⏭️  Wallet ${i+1}: Empty, skipping`);
+                            continue;
+                        }
+                        
+                        const transferAmount = balance - 5000;
+                        
+                        log(`💰 Sweeping wallet ${i+1}...`);
+                        
+                        const tx = new Transaction();
+                        tx.recentBlockhash = blockhash;
+                        tx.feePayer = subWallets[i].keypair.publicKey;
+                        tx.add(SystemProgram.transfer({
+                            fromPubkey: subWallets[i].keypair.publicKey,
+                            toPubkey: publicKey,
+                            lamports: transferAmount
+                        }));
+                        tx.sign(subWallets[i].keypair);
+                        
+                        const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+                        
+                        for (let attempt = 0; attempt < 20; attempt++) {
+                            const status = await connection.getSignatureStatus(sig);
+                            if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
+                                if (!status.value?.err) {
+                                    const solAmount = transferAmount / LAMPORTS_PER_SOL;
+                                    totalSwept += solAmount;
+                                    successCount++;
+                                    log(`✅ SUCCESS: Wallet ${i+1}: ${solAmount.toFixed(6)} SOL`);
+                                    break;
+                                }
+                            }
+                            await new Promise(r => setTimeout(r, 2000));
+                        }
+                        
+                        await new Promise(r => setTimeout(r, 1000));
+                        
+                    } catch (e) {
+                        log(`❌ Wallet ${i+1} failed: ${e.message}`);
+                    }
+                }
+                
+                log(`🎉 SWEEP COMPLETE! ${successCount} wallets, ${totalSwept.toFixed(6)} SOL returned`);
+                updateBalance();
+                alert(`Done! ${successCount} wallets swept, ${totalSwept.toFixed(6)} SOL returned`);
+                
+            } catch (error) {
+                log('❌ ERROR: ' + error.message);
+                console.error('Full error:', error);
+                alert('Error: ' + error.message);
+            } finally {
+                isBusy = false;
+            }
+        }
+        
+        // Initialize Solana library
+        setTimeout(function() {
+            if (typeof solanaWeb3 === 'undefined') {
+                alert('❌ ERROR: Solana library failed to load');
+                log('❌ FATAL: solanaWeb3 library not loaded');
+                return;
+            }
+            
+            // Extract Solana Web3 components
+            Connection = solanaWeb3.Connection;
+            Keypair = solanaWeb3.Keypair;
+            Transaction = solanaWeb3.Transaction;
+            SystemProgram = solanaWeb3.SystemProgram;
+            LAMPORTS_PER_SOL = solanaWeb3.LAMPORTS_PER_SOL;
+            
+            // Initialize connections
+            connection = new Connection('https://frequent-cosmopolitan-thunder.solana-mainnet.quiknode.pro/3108ed2d47a7f31953201358cdef57f0cf652e77/', 'confirmed');
+            balanceConnection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+            
+            log('✅ Bundler ready - Solana Web3 loaded');
+            
+        }, 1000);
+    </script>
+</body>
+</html>
